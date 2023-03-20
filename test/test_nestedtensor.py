@@ -2411,6 +2411,13 @@ class TestNestedTensorAutograd(TestCase):
         out = nt_layer_norm(nt)
         out.backward(out.clone())
 
+    def test_accumulate_grad_different_strides(self, device):
+        a = torch.nested.nested_tensor([torch.rand(1, 4, 2), torch.rand(1, 8, 2)], requires_grad=True)
+        b = a.clone()
+        l = torch.nn.functional.scaled_dot_product_attention(a, b, b)
+        l.backward(l.clone())
+
+
     # TODO: OOM https://github.com/pytorch/pytorch/issues/95562
     @skipIfSlowGradcheckEnv
     @parametrize("size", [1024, 1023, 513, 512, 256, 128, 32, 4, 2])
