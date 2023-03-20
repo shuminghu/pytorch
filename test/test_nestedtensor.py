@@ -2412,11 +2412,17 @@ class TestNestedTensorAutograd(TestCase):
         out.backward(out.clone())
 
     def test_accumulate_grad_different_strides(self, device):
-        a = torch.nested.nested_tensor([torch.rand(1, 4, 2), torch.rand(1, 8, 2)], requires_grad=True)
-        b = a.clone()
-        l = torch.nn.functional.scaled_dot_product_attention(a, b, b)
-        l.backward(l.clone())
+        a = torch.rand(1, 4, 2, requires_grad=True, dtype=torch.float64, device=device)
+        b= torch.rand(1, 8, 2, requires_grad=True, dtype=torch.float64, device=device)
 
+        def grad_test_func(a, b):
+            nt_1 = torch.nested.as_nested_tensor([a, b])
+            nt_2 = nt_1.clone()
+            out = torch.nn.functional.scaled_dot_product_attention(nt_1, nt_2, nt_2)
+            return torch.nested.to_padded_tensor(out, 0)
+
+        data = (a, b)
+        assert gradcheck(grad_test_func, inputs=data, check_batched_grad=False)
 
     # TODO: OOM https://github.com/pytorch/pytorch/issues/95562
     @skipIfSlowGradcheckEnv

@@ -257,7 +257,7 @@ inline bool nested_tensor_impl_is_contiguous(const NestedTensorImpl* nt) {
       sizemat_ptr += orig_dim;
       stridemat_ptr += orig_dim;
     }
-    // if there is blanck memory between underlying tensors
+    // if there is blank memory between underlying tensors
     if (offsets[0] != 0) {
       return false;
     }

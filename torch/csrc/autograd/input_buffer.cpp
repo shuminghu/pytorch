@@ -118,12 +118,7 @@ static void accumulate(
       can_accumulate_inplace(old_var) && !at::isTensorSubclassLike(var)) {
     buffer[pos] = old_var.add_(var);
   } else {
-    // NestedTensors don't support addition between tensors with different striding patterns.
-    if (old_var.is_nested()){
-      buffer[pos] = old_var.contiguous() + var.contiguous();
-    } else{
-       buffer[pos] = old_var + var;
-    }
+    buffer[pos] = old_var + var;
   }
 }
 
