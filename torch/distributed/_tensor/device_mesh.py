@@ -99,6 +99,7 @@ class DeviceMesh:
 
     device_type: str
     mesh: torch.Tensor
+    _local_rng_state: torch.Tensor
 
     def __init__(
         self,
