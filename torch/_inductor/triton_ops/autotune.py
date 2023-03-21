@@ -44,6 +44,7 @@ else:
     KernelInterface = object
     triton = None
 
+DEBUG = False
 
 class CachingAutotuner(KernelInterface):
     """
@@ -60,6 +61,13 @@ class CachingAutotuner(KernelInterface):
         self.save_cache_hook = save_cache_hook
         self.mutated_arg_names = mutated_arg_names
         self.configs = configs
+        self.coordesc_tuned = False
+
+        if DEBUG:
+            print(f"CachingAutotuner got {len(self.configs)} configs")
+            for c in self.configs:
+                print(c)
+
         self.launchers = []
         self.lock = threading.Lock()
         if os.getenv("TRITON_CACHE_DIR") is None:
@@ -181,10 +189,102 @@ class CachingAutotuner(KernelInterface):
         }
         return timings
 
+    def coordinate_descent_tuning(self, launcher, *args, **kwargs):
+        """
+        Tune one config parameter at a time.
+
+        TODO: will it be beneficial to tune multiple config parameters
+        simultaneously?
+
+        TODO: what if both increasing and descreasing a coordinate can improve
+        perf. i.e., there are multiple local optimal..
+        """
+        # clone inplace buffers to avoid autotune contaminating them if
+        # the kernel does in-place stores. avoid cloning other buffers because
+        # it leads to increase memory use
+        from ..compile_fx import clone_preserve_strides
+        cloned_args = []
+        for i, arg in enumerate(args):
+            if self.fn.arg_names[i] in self.mutated_arg_names:
+                assert isinstance(arg, torch.Tensor)
+                cloned_args.append(clone_preserve_strides(arg))
+            else:
+                cloned_args.append(arg)
+
+        best_timing = self.bench(launcher, *cloned_args, **kwargs)[0]
+        # TODO should tune YZBLOCK as well.
+        tuning_coordinates = ["XBLOCK", "RBLOCK", "num_warps"]
+
+        def get_coord(config, name):
+            if name in ["XBLOCK", "RBLOCK"]:
+                return config.kwargs.get(name, None)
+            elif name == "num_warps":
+                return config.num_warps
+            else:
+                raise KeyError(f"Unrecognized name {name}")
+
+        def set_coord(config, name, value):
+            if name in ["XBLOCK", "RBLOCK"]:
+                config.kwargs[name] = value
+            elif name == "num_warps":
+                config.num_warps = value
+            else:
+                raise KeyError(f"Unrecognized name {name}")
+
+        improved = True
+        best_launcher = launcher
+
+        def has_improvement(baseline, test):
+            threshold = 0.00001
+            return test is not None and test < baseline * (1 - threshold)
+
+        print("= Do coordinate descent tuning =")
+        while improved:
+            improved = False
+            for name in tuning_coordinates:
+                lhs_config, rhs_config = None, None
+                cur_val = get_coord(best_launcher.config, name)
+                # some kernel don't have RBLOCK. So cur_val may be None
+                if cur_val is None:
+                    continue
+
+                if cur_val > 1:
+                    lhs_config = copy.deepcopy(best_launcher.config)
+                    set_coord(lhs_config, name, cur_val // 2)
+                rhs_config = copy.deepcopy(best_launcher.config)
+                set_coord(rhs_config, name, cur_val * 2)
+
+                cand_launchers = [None, None]
+                cand_timings = [None, None]
+                # TODO: shout if both increasing/decreasing direction can improve perf
+                with self.lock:  # compiling
+                    idx = 0
+                    for config in [lhs_config, rhs_config]:
+                        if config is None:
+                            continue
+                        cand_launchers[idx] = self._precompile_config(config, None)
+                        cand_timings[idx] = self.bench(cand_launchers[idx], *cloned_args, **kwargs)[0]
+                        idx += 1
+
+                for launcher, timing in zip(cand_launchers, cand_timings):
+                    if launcher is None:
+                        continue
+                    if has_improvement(best_timing, timing):
+                        improved = True
+                        print(f"Tune from {best_launcher.config} {best_timing} -> {launcher.config} {timing}")
+                        best_timing = timing
+                        best_launcher = launcher
+                        break
+                    else:
+                        pass
+
+        return best_launcher
+
     def autotune_to_one_config(self, *args, **kwargs):
         """Do the actual autotuning"""
         timings = self.benchmark_all_configs(*args, **kwargs)
         self.launchers = [builtins.min(timings, key=timings.get)]
+
         if self.save_cache_hook:
             self.save_cache_hook(self.launchers[0].config)
 
@@ -195,7 +295,12 @@ class CachingAutotuner(KernelInterface):
             if len(self.launchers) > 1:
                 self.autotune_to_one_config(*args, grid=grid)
 
+        if not self.coordesc_tuned and config.coordinate_descent_tuning:
+            self.launchers = [self.coordinate_descent_tuning(self.launchers[0], *args, grid=grid)]
+            self.coordesc_tuned = True
+
         (launcher,) = self.launchers
+
         if launcher.config.pre_hook is not None:
             launcher.config.pre_hook(
                 {**zip(self.arg_names, args), **launcher.config.kwargs}
