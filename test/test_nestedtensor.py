@@ -931,13 +931,7 @@ class TestNestedTensorDeviceType(TestCase):
             nt2 = torch.nested.nested_tensor([c, d, c, d]).transpose(-1, -2)
         else:
             (nt1, nt2) = self.random_nt_pair(device, dtype, 4, (4, 4))
-        ref_list = []
-        for (t1, t2) in zip(nt1.unbind(), nt2.unbind()):
-            if transpose:
-                ref_list.append(t1 + t2.transpose(-1, -2))
-            else:
-                ref_list.append(t1 + t2)
-        ref = torch.nested.nested_tensor(ref_list)
+        ref = torch.nested.nested_tensor([t1 + t2 for (t1, t2) in zip(nt1.unbind(), nt2.unbind())])
         out = nt1 + nt2
         self.assertEqual(ref, out)
 

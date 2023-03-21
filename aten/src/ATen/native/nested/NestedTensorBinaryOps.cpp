@@ -26,8 +26,7 @@ std::pair<NestedTensorImpl*, NestedTensorImpl*>
 get_elementwise_nested_tensor_impl(
     const Tensor& self,
     const Tensor& other,
-    const std::string& op_name,
-    bool supports_striding) {
+    const std::string& op_name) {
   if (self.is_nested() && !(other.is_nested())) {
     TORCH_CHECK(
         false,
@@ -56,7 +55,7 @@ get_elementwise_nested_tensor_impl(
       op_name,
       " does not support broadcasting when given a NestedTensor");
   TORCH_CHECK(
-      supports_striding || at::equal(
+      at::equal(
           self_ptr->get_nested_stride_tensor(),
           other_ptr->get_nested_stride_tensor()),
       op_name,
@@ -81,8 +80,8 @@ Tensor NestedTensor_elementwise_Tensor(
     const std::string& op_name,
     bool supports_striding,
     Func f) {
-  auto self_contiguous = self;
-  auto other_contiguous = other;
+  Tensor self_contiguous = self;
+  Tensor other_contiguous = other;
   // self is a scalar
   if (!self.is_nested() && self.dim() == 0 && self.numel() == 1) {
     auto other_impl = get_nested_tensor_impl(other);
@@ -149,14 +148,11 @@ Tensor NestedTensor_elementwise_Tensor(
   NestedTensorImpl* self_impl = nullptr;
   NestedTensorImpl* other_impl = nullptr;
 
-  if (supports_striding){
-      self_contiguous = self.contiguous();
-      self_impl = get_nested_tensor_impl(self_contiguous);
-      other_contiguous = other.contiguous();
-      other_impl = get_nested_tensor_impl(other_contiguous);
-  }
+  self_contiguous = supports_striding ? self.contiguous() : self;
+  other_contiguous = supports_striding ? other.contiguous() : other;
+
   std::tie(self_impl, other_impl) =
-      get_elementwise_nested_tensor_impl(self, other, op_name, supports_striding);
+      get_elementwise_nested_tensor_impl(self_contiguous, other_contiguous, op_name);
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(self_impl);
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(other_impl);
   return wrap_buffer(
@@ -222,7 +218,7 @@ Tensor& NestedTensor_elementwise__Tensor(
   NestedTensorImpl* self_impl = nullptr;
   NestedTensorImpl* other_impl = nullptr;
   std::tie(self_impl, other_impl) =
-      get_elementwise_nested_tensor_impl(self, other, op_name, false);
+      get_elementwise_nested_tensor_impl(self, other, op_name);
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(self_impl);
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(other_impl);
   const auto& nt_self = *self_impl;
