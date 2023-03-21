@@ -35,20 +35,34 @@ class AutogradMonkeypatch(TorchFunctionMode):
             config.fallback_random
             and replacements[func] in replacements_using_triton_random
         ):
-            return replacements[func](*args, **kwargs)
+            if func not in fallback_cpu_random or (
+                func in fallback_cpu_random
+                and any(
+                    arg.device != torch.device("cpu")
+                    for arg in args
+                    if isinstance(arg, torch.Tensor)
+                )
+            ):
+                return replacements[func](*args, **kwargs)
         return func(*args, **kwargs)
 
 
 patch_functions = AutogradMonkeypatch
 
 
-def replace_fx(gm: torch.fx.GraphModule):
+def replace_fx(gm: torch.fx.GraphModule, example_inputs):
     # Sometimes patch_functions() misses things already in the graph
     for node in reversed(list(gm.graph.nodes)):
         if node.op == "call_function" and node.target in replacements:
             if (
                 config.fallback_random
                 and replacements[node.target] in replacements_using_triton_random
+            ):
+                continue
+            if node.target in fallback_cpu_random and all(
+                example_input.device == torch.device("cpu")
+                for example_input in example_inputs
+                if isinstance(example_input, torch.Tensor)
             ):
                 continue
             with gm.graph.inserting_before(node):
@@ -580,3 +594,5 @@ replacements = {torch.nn.functional.dropout: lowmem_dropout, torch.rand_like: ra
 # Keep track of any replacement functions that use triton random,
 # so they can be avoided when fallback_random is set
 replacements_using_triton_random = {lowmem_dropout, rand_like}
+
+fallback_cpu_random = {torch.nn.functional.dropout}
