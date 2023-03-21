@@ -81,6 +81,8 @@ Tensor NestedTensor_elementwise_Tensor(
     const std::string& op_name,
     bool supports_striding,
     Func f) {
+  auto self_contiguous = self;
+  auto other_contiguous = other;
   // self is a scalar
   if (!self.is_nested() && self.dim() == 0 && self.numel() == 1) {
     auto other_impl = get_nested_tensor_impl(other);
@@ -126,9 +128,8 @@ Tensor NestedTensor_elementwise_Tensor(
     }
 
     if (is_broadcastable_3d) {
-      if (!nested_tensor_impl_is_contiguous(self_ptr)) {
-        self_ptr = get_nested_tensor_impl(self.contiguous());
-      }
+      self_contiguous = self.contiguous();
+      self_ptr = get_nested_tensor_impl(self_contiguous);
       const auto self_buffer = self_ptr->get_buffer();
       const auto self_sizes = self_ptr->get_nested_size_tensor();
       auto result_buffer = at::empty_like(self_buffer);
@@ -147,18 +148,17 @@ Tensor NestedTensor_elementwise_Tensor(
 
   NestedTensorImpl* self_impl = nullptr;
   NestedTensorImpl* other_impl = nullptr;
+
+  if (supports_striding){
+      self_contiguous = self.contiguous();
+      self_impl = get_nested_tensor_impl(self_contiguous);
+      other_contiguous = other.contiguous();
+      other_impl = get_nested_tensor_impl(other_contiguous);
+  }
   std::tie(self_impl, other_impl) =
       get_elementwise_nested_tensor_impl(self, other, op_name, supports_striding);
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(self_impl);
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(other_impl);
-  if (supports_striding ) {
-    if (!nested_tensor_impl_is_contiguous(self_impl)) {
-        self_impl = get_nested_tensor_impl(self.contiguous());
-      }
-      if (!nested_tensor_impl_is_contiguous(other_impl)) {
-        other_impl = get_nested_tensor_impl(other.contiguous());
-      }
-  }
   return wrap_buffer(
       f(self_impl->get_unsafe_storage_as_tensor(),
         other_impl->get_unsafe_storage_as_tensor()),
