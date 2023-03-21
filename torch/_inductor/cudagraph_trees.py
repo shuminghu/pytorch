@@ -258,12 +258,14 @@ def cudagraphify_impl(
     device_index: int,
     is_backward: bool,
     is_inference: bool,
+    stack_traces: Optional[List[Optional[str]]] = None,
 ):
     manager = get_container(device_index).get_tree_manager()
     return manager.add_function(
         model,
         inputs,
         static_input_idxs,
+        stack_traces,
         is_backward,
         is_inference,
     )
@@ -378,6 +380,7 @@ class CUDAWarmupNode:
         cuda_graphs_pool: Tuple[int, int],
         existing_cuda_graph: torch.cuda.Graph,
         device_index: int,
+        stack_traces: Optional[List[Optional[str]]],
     ):
         self.wrapped_function = wrapped_function
         self.parent = parent
@@ -386,6 +389,7 @@ class CUDAWarmupNode:
         self.existing_cuda_graph = existing_cuda_graph
         self.has_run = False
         self.device_index = device_index
+        self.stack_traces = stack_traces
 
     def run(self, new_inputs):
         assert not self.has_run, "Wrapped function should never be run twice"
@@ -436,6 +440,12 @@ class CUDAWarmupNode:
 
     def path_live_weakrefs(self) -> Generator[StorageWeakRefWrapper]:
         "Returns all live storages weakrefs that created by nodes in this path"
+        for stor_ref, _ in self.path_live_weakrefs_and_stacktraces():
+            yield stor_ref
+
+    def path_live_weakrefs_and_stacktraces(
+        self,
+    ) -> Generator[Tuple[StorageWeakRefWrapper, Optional[str]]]:
         nodes = []
         node = self
         while node:
@@ -443,9 +453,9 @@ class CUDAWarmupNode:
             node = node.parent
 
         for node in reversed(nodes):
-            for output in node.outputs_weakrefs:
+            for i, output in enumerate(node.outputs_weakrefs):
                 if is_live(output):
-                    yield output
+                    yield output, (node.stack_traces[i] if node.stack_traces else None)
 
     def all_outputs_are_dead(self):
         return not list(self.path_live_weakrefs())
@@ -486,12 +496,14 @@ class CUDAGraphNode:
         inputs: List[Tensor],
         cuda_graphs_pool: Tuple[int, int],
         device_index: int,
+        stack_traces: Optional[List[Optional[str]]],
     ):
         assert isinstance(inputs, (list, tuple))
 
         self.wrapped_function = wrapped_function
         self.id = id
         self.device = device_index
+        self.stack_traces = stack_traces
 
         # if this is a root parent will be None. use weakref to prevent reference cycle
         self._parent = weakref.ref(parent) if parent is not None else None
@@ -509,6 +521,9 @@ class CUDAGraphNode:
         self.outputs_weakrefs: OutputList[Optional[StorageWeakRefWrapper]] = []
         self.path_weakrefs: LevelList[OutputList[Optional[StorageWeakRefWrapper]]] = [
             node.outputs_weakrefs for node in self._path_from_root
+        ]
+        self.path_stacktraces: LevelList[List[Optional[str]]] = [
+            node.stack_traces for node in self._path_from_root
         ]
 
         # tensors which are outputs of previous graphs in the tree
@@ -719,6 +734,13 @@ class CUDAGraphNode:
                 o is not None
                 and o.untyped_storage().data_ptr() in self.static_input_storage_ptrs
             )
+
+        if self.stack_traces is None:
+            self.stack_traces = [None for _ in range(len(outputs))]
+        else:
+            assert len(self.stack_traces) == len(
+                outputs
+            ), "Wrong number of stack traces passed in"
 
         self._add_replayed_outputs(outputs)
         self.recorded_liveness_after_graph = self._get_liveness(self.path_weakrefs)
@@ -1066,6 +1088,8 @@ class CUDAGraphTreeManager:
         # mapping from function id to wrapped function
         self.ids_to_funcs: Dict[FunctionID, WrappedFunction] = {}
 
+        self.ids_to_stack_traces: Dict[FunctionID, List[Optional[str]]] = {}
+
         self.warmed_up_functions: Set[FunctionID] = set()
 
         with torch.cuda.device(device_index):
@@ -1194,6 +1218,7 @@ class CUDAGraphTreeManager:
             new_inputs,
             self.cuda_graphs_thread_pool,
             self.device_index,
+            self.ids_to_stack_traces[function_id],
         )
         if self.current_node is None:
             self.roots[function_id].append(node)
@@ -1220,6 +1245,7 @@ class CUDAGraphTreeManager:
             self.cuda_graphs_thread_pool,
             self.graph,
             self.device_index,
+            self.ids_to_stack_traces[function_id],
         )
         self.current_node = node
         self.path_state = ExecutionState.WARMUP
@@ -1240,10 +1266,12 @@ class CUDAGraphTreeManager:
         model,
         inputs,
         static_input_idxs,
+        stack_traces,
         is_backward,
         is_inference,
     ) -> Callable:
         id = self.new_func_id()
+        self.ids_to_stack_traces[id] = stack_traces
         self.ids_to_funcs[id] = WrappedFunction(
             model, remove_unaligned_input_idxs(inputs, static_input_idxs), id
         )
@@ -1345,9 +1373,14 @@ class CUDAGraphTreeManager:
     def dealloc_current_path_weakrefs(self):
         # TODO: we could also allow the these weak refs to continue to be allocated,
         # but that adds some complications.
-        for t in self.current_node.path_live_weakrefs():
+        for t, stack_trace in self.current_node.path_live_weakrefs_and_stacktraces():
+            # TODO: dont need to test t(), but would need to deduplicate storages
             if t():
                 torch._C._free_And_Remove_DeleterFn(t())
+                warnings.warn(
+                    f"CUDA Graphs is Deallocating Tensor Output from {stack_trace.strip()}. "
+                    "Deallocate output tensor no longer in use or copy output."
+                )
 
     def clear_current_node_outputs_and_set_to_none(self):
         self.current_node.clear_path_outputs()
